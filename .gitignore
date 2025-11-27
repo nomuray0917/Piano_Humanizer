@@ -1,0 +1,19 @@
+Pythonのキャッシュ（ゴミ）
+
+pycache/ *.py[cod]
+
+仮想環境（重たいライブラリの塊）
+
+venv/ .venv/ env/
+
+MacやWindowsのシステムファイル
+
+.DS_Store Thumbs.db
+
+前回のexe化実験で作った重いフォルダ
+
+dist/ build/ *.spec *.exe
+
+秘密鍵が含まれる可能性のあるファイル（念の為）
+
+.env
