@@ -6,17 +6,17 @@ import os
 import google.generativeai as genai
 import time
 
-# ページ設定（レイアウトをwideに変更して横並びに対応）
+# ページ設定
 st.set_page_config(
     page_title="Piano Humanizer AI with Gemini",
     page_icon="🎹",
     layout="wide" 
 )
 
-st.title("🎹 Piano Humanizer AI v3.1")
+st.title("🎹 Piano Humanizer AI")
 st.caption("Powered by Google Gemini 2.0 Flash")
 
-# --- ロジック1: 統計的ヒューマナイズ（既存） ---
+# --- ロジック1: 統計的ヒューマナイズ ---
 def apply_statistical_humanize(note, vel_std, time_std):
     velocity_noise = random.gauss(0, vel_std * 20)
     pitch_bias = 3 if note.pitch > 72 else 0
@@ -29,17 +29,13 @@ def apply_statistical_humanize(note, vel_std, time_std):
     note.start = new_start
     note.end = new_end
 
-# --- ロジック2: Gemini AI ヒューマナイズ（新規） ---
+# --- ロジック2: Gemini AI ヒューマナイズ ---
 def apply_gemini_humanize(pm, api_key, progress_bar):
-    """
-    Gemini APIを使用して、MIDIデータから推奨されるベロシティ列を生成する
-    """
-    genai.configure(api_key=api_key)
+    clean_key = api_key.strip()
+    genai.configure(api_key=clean_key)
     
-    # 高速かつ最新の2.0 Flashモデルを使用
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
-    # ドラム以外のトラックを抽出
     target_instruments = [i for i in pm.instruments if not i.is_drum]
     
     if not target_instruments:
@@ -47,13 +43,10 @@ def apply_gemini_humanize(pm, api_key, progress_bar):
 
     status_text = st.empty()
     
-    # トラックごとに処理
     for inst_idx, instrument in enumerate(target_instruments):
         notes = instrument.notes
-        
-        chunk_size = 300 # 1回のAPIコールで処理するノート数
+        chunk_size = 300 
         chunks = [notes[i:i + chunk_size] for i in range(0, len(notes), chunk_size)]
-        
         total_chunks = len(chunks)
         
         status_text.text(f"Track {inst_idx+1}: Geminiが演奏データを生成中... (全{len(notes)}音)")
@@ -76,29 +69,21 @@ def apply_gemini_humanize(pm, api_key, progress_bar):
             """
             
             try:
-                # Geminiに生成させる
                 response = model.generate_content(prompt)
-                
-                # テキストを数値リストに変換
                 text_result = response.text.strip()
                 text_result = text_result.replace('[', '').replace(']', '').replace('\n', ' ')
                 velocities = [int(v.strip()) for v in text_result.split(',') if v.strip().isdigit()]
                 
-                # 適用
                 for j, vel in enumerate(velocities):
                     if j < len(chunk):
                         chunk[j].velocity = max(1, min(127, vel))
                 
-                # 進捗バー更新
                 current_progress = (inst_idx / len(target_instruments)) + ((i + 1) / total_chunks) * (1 / len(target_instruments))
                 progress_bar.progress(min(current_progress, 1.0))
-                
-                # APIレート制限への配慮（少し待つ）
                 time.sleep(1)
 
             except Exception as e:
                 st.warning(f"Chunk {i+1} failed: {e}. Skipping AI processing for this part.")
-                # エラー時は統計的処理でフォールバック
                 for note in chunk:
                     apply_statistical_humanize(note, 0.3, 0.1)
 
@@ -113,22 +98,18 @@ def process_midi(midi_file, mode, vel_std, time_std, api_key=None):
         st.error(f"MIDI読み込みエラー: {e}")
         return None
 
-    # プログレスバー
     progress_bar = st.progress(0)
 
     if mode == "Gemini":
-        # Geminiモード
         if not api_key:
             st.error("APIキーが必要です。")
             return None
-        pm = apply_gemini_humanize(pm, api_key, progress_bar)
+        pm = apply_gemini_humanize(pm, api_key.strip(), progress_bar)
         progress_bar.progress(1.0)
         
     else:
-        # 統計モード
         total_notes = sum([len(i.notes) for i in pm.instruments])
         processed_notes = 0
-        
         for instrument in pm.instruments:
             if instrument.is_drum: continue
             for note in instrument.notes:
@@ -142,7 +123,6 @@ def process_midi(midi_file, mode, vel_std, time_std, api_key=None):
 
 # --- UI構築 ---
 
-# カラムを作成（左：メイン操作、右：設定）
 col_main, col_settings = st.columns([2, 1], gap="large")
 
 with col_settings:
@@ -152,7 +132,7 @@ with col_settings:
     mode = st.radio(
         "処理モード",
         ("Statistical (統計/安定版)", "Gemini"),
-        help="GeminiモードはAPIキーが必要です。曲の文脈を理解してベロシティを決定します。"
+        help="GeminiモードはAPIキーが必要です。"
     )
 
     api_key = ""
@@ -161,7 +141,8 @@ with col_settings:
 
     if mode == "Gemini":
         st.markdown("### Google AI Studio API Key")
-        api_key = st.text_input("APIキーを入力", type="password", help="Google AI Studioで取得したキーを入力してください")
+        api_key_input = st.text_input("APIキーを入力", type="password", help="Google AI Studioで取得したキーを入力してください")
+        api_key = api_key_input.strip() if api_key_input else ""
         st.caption("[APIキーの取得はこちら](https://aistudio.google.com/app/apikey)")
     else:
         st.markdown("---")
@@ -174,18 +155,14 @@ with col_main:
     uploaded_file = st.file_uploader("MIDIファイルをアップロード", type=["mid", "midi"])
 
     if uploaded_file is not None:
-        # ファイル情報を表示
         st.success(f"読み込み完了: {uploaded_file.name}")
-        
         st.markdown("---")
-        st.markdown(f"**現在のモード:** {mode}")
         
         if st.button("変換を実行", type="primary", use_container_width=True):
             if mode == "Gemini" and not api_key:
                 st.error("⚠️ Geminiモードを使用するには右側の設定パネルでAPIキーを入力してください。")
             else:
                 with st.spinner("処理中..."):
-                    # パラメータはモードによって使い分ける
                     v_param = velocity_amount if mode != "Gemini" else 0
                     t_param = timing_amount if mode != "Gemini" else 0
                     
@@ -206,12 +183,47 @@ with col_main:
                             use_container_width=True
                         )
 
+# --- FAQセクション (新機能) ---
 st.markdown("---")
-with st.expander("Gemini AIモードについて"):
+st.subheader("❓ よくある質問 (FAQ)")
+
+with st.expander("Q. Google Gemini APIキーはどこで取得できますか？無料ですか？"):
     st.markdown("""
-    **Gemini 2.0 Flash (Experimental)** モデルを使用して、あなたのMIDIデータを解析します。
+    **A. 無料で取得可能です。**
     
-    1. MIDIデータを楽譜（音の高さと長さのリスト）としてAIに送ります。
-    2. AIは「プロのピアニスト」として振る舞い、文脈に応じた適切な強弱（ベロシティ）を考えます。
-    3. AIが決めた強弱データを元のMIDIに適用します。
+    1. [Google AI Studio](https://aistudio.google.com/app/apikey) にアクセスします。
+    2. Googleアカウントでログインします。
+    3. **「Create API key」** ボタンを押します。
+    4. 生成されたキー（`AIza`で始まる文字列）をコピーして、このアプリの右側（スマホなら下）の設定欄に入力してください。
+    
+    ※ 現在のGoogleのプランでは、個人利用の範囲内であれば無料で十分な回数を利用できます。
+    """)
+
+with st.expander("Q. APIキーを入力しても安全ですか？保存されませんか？"):
+    st.markdown("""
+    **A. はい、安全です。**
+    
+    入力されたAPIキーは、あなたのブラウザからGoogleのサーバーへ通信するためだけに使用されます。
+    **このアプリの開発者やサーバーがあなたのキーを保存・記録することは一切ありません。**
+    ページを閉じたりリロードすると、キー情報はきれいに消去されます。
+    """)
+
+with st.expander("Q. 「統計モード」と「Geminiモード」どちらを使えばいいですか？"):
+    st.markdown("""
+    **🎹 Statistical (統計/安定版)**
+    - **おすすめ:** ポップスのバッキング、BGM、ドラム以外の全般。
+    - **特徴:** 数学的な計算で「人間らしいズレ」を作ります。処理が一瞬で終わります。
+    
+    **🤖 Gemini**
+    - **おすすめ:** ピアノソロ、バラードのメロディ、感情的な表現が欲しい時。
+    - **特徴:** AIが楽譜を読んで「ここは強く弾こう」と判断します。処理に時間がかかりますが、ドラマチックな演奏になります。
+    """)
+
+with st.expander("Q. エラーが出たり、処理が止まってしまいます。"):
+    st.markdown("""
+    **A. 以下の点を確認してください。**
+    
+    - **曲が長すぎる:** Geminiモードは数分かかることがあります。まずは短い曲で試してみてください。
+    - **APIキーの間違い:** コピー時に余分なスペースが入っていないか確認してください。
+    - **MIDIファイルの問題:** 特殊なデータが含まれていると失敗することがあります。「統計モード」なら動く場合が多いです。
     """)
