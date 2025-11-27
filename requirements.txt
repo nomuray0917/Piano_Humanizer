@@ -1,0 +1,4 @@
+streamlit 
+pretty_midi 
+numpy 
+google-generativeai
