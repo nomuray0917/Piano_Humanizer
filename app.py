@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide" 
 )
 
-st.title("🎹 Piano Humanizer AI v3.3")
+st.title("🎹 Piano Humanizer AI v3.4 (エラー修正版)")
 st.caption("Powered by Google Gemini 2.0 Flash")
 
 # --- ロジック1: 統計的ヒューマナイズ ---
@@ -109,9 +109,10 @@ def apply_gemini_humanize(pm, api_key, progress_bar, selected_instruments):
     return pm
 
 # --- メイン処理関数 ---
-def process_midi(midi_file, mode, vel_std, time_std, api_key, selected_instruments):
+def process_midi(midi_file_data, mode, vel_std, time_std, api_key, selected_instruments):
     try:
-        pm = pretty_midi.PrettyMIDI(midi_file)
+        # バイナリデータからPrettyMIDIオブジェクトを再構築
+        pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_file_data))
     except Exception as e:
         st.error(f"MIDI読み込みエラー: {e}")
         return None
@@ -186,10 +187,19 @@ with col_main:
         # ファイルが新しくアップロードされたらセッション状態を更新
         if st.session_state['midi_data'] is None or st.session_state['midi_data']['name'] != uploaded_file.name:
             try:
-                # pretty_midiオブジェクトをメモリに保存（ファイル名も）
+                # 処理用にPrettyMIDIオブジェクトを作成
                 pm = pretty_midi.PrettyMIDI(uploaded_file)
+                # インストゥルメント情報とファイルデータ本体を保存
                 instrument_names = [i.name if i.name else f"Track {idx+1} ({pretty_midi.instrument_name_to_program(i.program)})" for idx, i in enumerate(pm.instruments)]
-                st.session_state['midi_data'] = {'pm': pm, 'name': uploaded_file.name, 'instruments': instrument_names}
+                uploaded_file.seek(0) # ファイルポインタを先頭に戻す
+                midi_bytes = uploaded_file.read() # ファイルのバイナリデータを読み取る
+
+                # セッションステートにバイナリデータと名前、トラック情報を保存
+                st.session_state['midi_data'] = {
+                    'bytes': midi_bytes, 
+                    'name': uploaded_file.name, 
+                    'instruments': instrument_names
+                }
                 st.success(f"読み込み完了: {uploaded_file.name}")
             except Exception as e:
                 st.error(f"MIDI解析エラー: {e}")
@@ -218,14 +228,15 @@ with col_main:
                     st.error("⚠️ Geminiモードを使用するには右側の設定パネルでAPIキーを入力してください。")
                 else:
                     with st.spinner("処理中..."):
-                        # pretty_midiオブジェクトを操作するために一度コピー
-                        pm_to_process = st.session_state['midi_data']['pm'].copy()
+                        # セッションステートからバイナリデータを取得
+                        midi_file_data = st.session_state['midi_data']['bytes']
                         
                         v_param = velocity_amount if mode != "Gemini" else 0
                         t_param = timing_amount if mode != "Gemini" else 0
                         
+                        # バイナリデータ（midi_file_data）を渡すように変更
                         processed_pm = process_midi(
-                            uploaded_file, # pretty_midi constructor needs the file object
+                            midi_file_data, 
                             mode, 
                             v_param, 
                             t_param, 
