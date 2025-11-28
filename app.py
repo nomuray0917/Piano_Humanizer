@@ -13,16 +13,18 @@ st.set_page_config(
     layout="wide" 
 )
 
-st.title("🎹 Piano Humanizer AI")
+st.title("🎹 Piano Humanizer AI v3.3")
 st.caption("Powered by Google Gemini 2.0 Flash")
 
 # --- ロジック1: 統計的ヒューマナイズ ---
 def apply_statistical_humanize(note, vel_std, time_std):
+    # ベロシティにランダムなばらつきを追加
     velocity_noise = random.gauss(0, vel_std * 20)
     pitch_bias = 3 if note.pitch > 72 else 0
     new_velocity = int(note.velocity + velocity_noise + pitch_bias)
     note.velocity = max(1, min(127, new_velocity))
 
+    # タイミングにランダムな揺らぎを追加
     timing_noise = random.gauss(0, time_std * 0.05)
     new_start = max(0, note.start + timing_noise)
     new_end = max(new_start + 0.1, note.end + timing_noise)
@@ -30,34 +32,43 @@ def apply_statistical_humanize(note, vel_std, time_std):
     note.end = new_end
 
 # --- ロジック2: Gemini AI ヒューマナイズ ---
-def apply_gemini_humanize(pm, api_key, progress_bar):
+def apply_gemini_humanize(pm, api_key, progress_bar, selected_instruments):
+    """
+    Gemini APIを使用して、選択されたインストゥルメントのMIDIデータから推奨されるベロシティ列を生成する
+    """
     clean_key = api_key.strip()
     genai.configure(api_key=clean_key)
     
     model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
-    target_instruments = [i for i in pm.instruments if not i.is_drum]
+    # 選択されたインストゥルメントのみを対象とする
+    target_instruments = [inst for inst in pm.instruments if inst.name in selected_instruments]
     
     if not target_instruments:
+        st.warning("処理対象のトラックが選択されていません。")
         return pm
 
     status_text = st.empty()
     
+    total_instruments = len(target_instruments)
+    
     for inst_idx, instrument in enumerate(target_instruments):
         notes = instrument.notes
-        chunk_size = 300 
+        
+        chunk_size = 300 # 1回のAPIコールで処理するノート数
         chunks = [notes[i:i + chunk_size] for i in range(0, len(notes), chunk_size)]
         total_chunks = len(chunks)
         
-        status_text.text(f"Track {inst_idx+1}: Geminiが演奏データを生成中... (全{len(notes)}音)")
+        status_text.text(f"Track {instrument.name}: Geminiが演奏データを生成中... ({len(notes)}音)")
         
         for i, chunk in enumerate(chunks):
+            # (音高, 音長)のリストをプロンプト用に整形
             notes_str = ", ".join([f"({n.pitch},{n.end - n.start:.2f})" for n in chunk])
             
             prompt = f"""
-            You are a professional pianist.
+            You are a professional musician playing the instrument: {instrument.name}.
             Please determine the velocity (1-127) for each note in the following sequence to create a human-like, expressive performance.
-            Consider phrasing and dynamics naturally.
+            Consider phrasing and dynamics naturally for this instrument.
             
             Input Format: (Pitch, Duration), (Pitch, Duration)...
             Input Data: [{notes_str}]
@@ -69,21 +80,28 @@ def apply_gemini_humanize(pm, api_key, progress_bar):
             """
             
             try:
+                # Geminiに生成させる
                 response = model.generate_content(prompt)
+                
+                # 結果をパースして数値リストに変換
                 text_result = response.text.strip()
                 text_result = text_result.replace('[', '').replace(']', '').replace('\n', ' ')
                 velocities = [int(v.strip()) for v in text_result.split(',') if v.strip().isdigit()]
                 
+                # 適用
                 for j, vel in enumerate(velocities):
                     if j < len(chunk):
                         chunk[j].velocity = max(1, min(127, vel))
                 
-                current_progress = (inst_idx / len(target_instruments)) + ((i + 1) / total_chunks) * (1 / len(target_instruments))
+                # 進捗バー更新
+                current_progress = (inst_idx / total_instruments) + ((i + 1) / total_chunks) * (1 / total_instruments)
                 progress_bar.progress(min(current_progress, 1.0))
-                time.sleep(1)
+                
+                time.sleep(1) # APIレート制限への配慮
 
             except Exception as e:
-                st.warning(f"Chunk {i+1} failed: {e}. Skipping AI processing for this part.")
+                st.warning(f"Track {instrument.name}, Chunk {i+1} failed: {e}. Skipping AI processing for this part.")
+                # エラー時は統計的処理でフォールバック
                 for note in chunk:
                     apply_statistical_humanize(note, 0.3, 0.1)
 
@@ -91,26 +109,30 @@ def apply_gemini_humanize(pm, api_key, progress_bar):
     return pm
 
 # --- メイン処理関数 ---
-def process_midi(midi_file, mode, vel_std, time_std, api_key=None):
+def process_midi(midi_file, mode, vel_std, time_std, api_key, selected_instruments):
     try:
         pm = pretty_midi.PrettyMIDI(midi_file)
     except Exception as e:
         st.error(f"MIDI読み込みエラー: {e}")
         return None
 
+    # プログレスバー
     progress_bar = st.progress(0)
 
     if mode == "Gemini":
         if not api_key:
             st.error("APIキーが必要です。")
             return None
-        pm = apply_gemini_humanize(pm, api_key.strip(), progress_bar)
-        progress_bar.progress(1.0)
+        pm = apply_gemini_humanize(pm, api_key.strip(), progress_bar, selected_instruments)
         
     else:
-        total_notes = sum([len(i.notes) for i in pm.instruments])
+        # 統計モード：選択されたトラックのみを処理
+        target_instruments = [inst for inst in pm.instruments if inst.name in selected_instruments]
+        
+        total_notes = sum([len(i.notes) for i in target_instruments])
         processed_notes = 0
-        for instrument in pm.instruments:
+        
+        for instrument in target_instruments:
             if instrument.is_drum: continue
             for note in instrument.notes:
                 apply_statistical_humanize(note, vel_std, time_std)
@@ -125,6 +147,11 @@ def process_midi(midi_file, mode, vel_std, time_std, api_key=None):
 
 col_main, col_settings = st.columns([2, 1], gap="large")
 
+# アップロードされたMIDIデータをセッション状態に保存する
+if 'midi_data' not in st.session_state:
+    st.session_state['midi_data'] = None
+
+# --- 設定パネル (右側) ---
 with col_settings:
     st.header("🎛 設定")
     st.info("ここでAIの挙動を調整します")
@@ -150,40 +177,79 @@ with col_settings:
         velocity_amount = st.slider("ベロシティ強度", 0.0, 1.0, 0.5)
         timing_amount = st.slider("タイミング揺れ", 0.0, 1.0, 0.3)
 
+# --- メイン操作パネル (左側) ---
 with col_main:
     st.subheader("📁 ファイル操作")
     uploaded_file = st.file_uploader("MIDIファイルをアップロード", type=["mid", "midi"])
 
     if uploaded_file is not None:
-        st.success(f"読み込み完了: {uploaded_file.name}")
-        st.markdown("---")
-        
-        if st.button("変換を実行", type="primary", use_container_width=True):
-            if mode == "Gemini" and not api_key:
-                st.error("⚠️ Geminiモードを使用するには右側の設定パネルでAPIキーを入力してください。")
-            else:
-                with st.spinner("処理中..."):
-                    v_param = velocity_amount if mode != "Gemini" else 0
-                    t_param = timing_amount if mode != "Gemini" else 0
-                    
-                    processed_pm = process_midi(uploaded_file, mode, v_param, t_param, api_key)
-                    
-                    if processed_pm:
-                        bio = io.BytesIO()
-                        processed_pm.write(bio)
-                        bio.seek(0)
-                        
-                        st.balloons()
-                        st.success("完了しました！")
-                        st.download_button(
-                            label="🎹 Humanized MIDIをダウンロード",
-                            data=bio,
-                            file_name=f"gemini_humanized_{uploaded_file.name}" if api_key else f"humanized_{uploaded_file.name}",
-                            mime="audio/midi",
-                            use_container_width=True
-                        )
+        # ファイルが新しくアップロードされたらセッション状態を更新
+        if st.session_state['midi_data'] is None or st.session_state['midi_data']['name'] != uploaded_file.name:
+            try:
+                # pretty_midiオブジェクトをメモリに保存（ファイル名も）
+                pm = pretty_midi.PrettyMIDI(uploaded_file)
+                instrument_names = [i.name if i.name else f"Track {idx+1} ({pretty_midi.instrument_name_to_program(i.program)})" for idx, i in enumerate(pm.instruments)]
+                st.session_state['midi_data'] = {'pm': pm, 'name': uploaded_file.name, 'instruments': instrument_names}
+                st.success(f"読み込み完了: {uploaded_file.name}")
+            except Exception as e:
+                st.error(f"MIDI解析エラー: {e}")
+                st.session_state['midi_data'] = None
+                uploaded_file = None
 
-# --- FAQセクション (新機能) ---
+        if st.session_state['midi_data']:
+            st.markdown("---")
+            
+            # --- トラック選択機能 ---
+            all_instruments = st.session_state['midi_data']['instruments']
+            
+            st.subheader("🎵 処理対象トラックの選択")
+            selected_instruments = st.multiselect(
+                "AI/統計処理を適用したいトラックを選んでください（複数選択可）",
+                options=all_instruments,
+                default=[name for name in all_instruments if "Piano" in name or "Keyboard" in name or "Lead" in name]
+            )
+            
+            st.markdown(f"**現在のモード:** {mode}")
+            
+            if st.button("変換を実行", type="primary", use_container_width=True, disabled=not selected_instruments):
+                if not selected_instruments:
+                    st.error("⚠️ 処理対象トラックを1つ以上選択してください。")
+                elif mode == "Gemini" and not api_key:
+                    st.error("⚠️ Geminiモードを使用するには右側の設定パネルでAPIキーを入力してください。")
+                else:
+                    with st.spinner("処理中..."):
+                        # pretty_midiオブジェクトを操作するために一度コピー
+                        pm_to_process = st.session_state['midi_data']['pm'].copy()
+                        
+                        v_param = velocity_amount if mode != "Gemini" else 0
+                        t_param = timing_amount if mode != "Gemini" else 0
+                        
+                        processed_pm = process_midi(
+                            uploaded_file, # pretty_midi constructor needs the file object
+                            mode, 
+                            v_param, 
+                            t_param, 
+                            api_key, 
+                            selected_instruments
+                        )
+                        
+                        if processed_pm:
+                            # 処理後のMIDIをバイナリデータとして書き出す
+                            bio = io.BytesIO()
+                            processed_pm.write(bio)
+                            bio.seek(0)
+                            
+                            st.balloons()
+                            st.success("完了しました！")
+                            st.download_button(
+                                label="🎹 Humanized MIDIをダウンロード",
+                                data=bio,
+                                file_name=f"humanized_{st.session_state['midi_data']['name']}",
+                                mime="audio/midi",
+                                use_container_width=True
+                            )
+
+# --- FAQセクション ---
 st.markdown("---")
 st.subheader("❓ よくある質問 (FAQ)")
 
@@ -194,7 +260,7 @@ with st.expander("Q. Google Gemini APIキーはどこで取得できますか？
     1. [Google AI Studio](https://aistudio.google.com/app/apikey) にアクセスします。
     2. Googleアカウントでログインします。
     3. **「Create API key」** ボタンを押します。
-    4. 生成されたキー（`AIza`で始まる文字列）をコピーして、このアプリの右側（スマホなら下）の設定欄に入力してください。
+    4. 生成されたキー（`AIza`で始まる文字列）をコピーして、このアプリの右側の設定欄に入力してください。
     
     ※ 現在のGoogleのプランでは、個人利用の範囲内であれば無料で十分な回数を利用できます。
     """)
@@ -211,12 +277,12 @@ with st.expander("Q. APIキーを入力しても安全ですか？保存され�
 with st.expander("Q. 「統計モード」と「Geminiモード」どちらを使えばいいですか？"):
     st.markdown("""
     **🎹 Statistical (統計/安定版)**
-    - **おすすめ:** ポップスのバッキング、BGM、ドラム以外の全般。
-    - **特徴:** 数学的な計算で「人間らしいズレ」を作ります。処理が一瞬で終わります。
-    
+    - **おすすめ:** ポップスのバッキング、BGM、ドラム以外の全般。処理が非常に高速です。
+    - **特徴:** 数学的な計算で「人間らしいズレ」を作ります。
+
     **🤖 Gemini**
     - **おすすめ:** ピアノソロ、バラードのメロディ、感情的な表現が欲しい時。
-    - **特徴:** AIが楽譜を読んで「ここは強く弾こう」と判断します。処理に時間がかかりますが、ドラマチックな演奏になります。
+    - **特徴:** AIが楽譜を読んで「ここは強く弾こう」と判断し、より表現豊かな演奏を生成します。
     """)
 
 with st.expander("Q. エラーが出たり、処理が止まってしまいます。"):
